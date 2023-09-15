@@ -52,15 +52,19 @@ const Note = struct {
     start: f32,
     /// how long the note plays for, in beats
     duration: f32,
-    /// which note should play, in half steps from A4
-    pitch: f32,
+    /// which note should play, in half steps from A4, or null for rest
+    pitch: ?f32,
 
-    pub fn init(start: f32, duration: f32, note_name: []const u8) Note {
-        return .{ .start = start, .duration = duration, .pitch = pitchFromString(note_name) };
+    pub fn init(start: f32, duration: f32, maybe_note_name: ?[]const u8) Note {
+        return .{
+            .start = start,
+            .duration = duration,
+            .pitch = if (maybe_note_name) |note_name| pitchFromString(note_name) else null,
+        };
     }
 };
 
-const notes = [_]Note{
+const megalovania_notes = [_]Note{
     Note.init(0.0, 0.5, "d4"),
     Note.init(0.5, 0.5, "d4"),
     Note.init(1.0, 1.0, "d5"),
@@ -106,8 +110,47 @@ const notes = [_]Note{
     Note.init(31.5, 0.5, "g4"),
 };
 
-const bpm = 240.0;
-const seconds_per_beat = 60.0 / bpm;
+const Voice = struct {
+    notes: []const Note,
+    note_index: usize = 0,
+    seconds_offset: f32 = 0.0,
+    decay: f32,
+    seconds_per_beat: f32,
+
+    pub fn init(notes: []const Note, bpm: f32, decay: f32) Voice {
+        return .{
+            .notes = notes,
+            .decay = decay,
+            .seconds_per_beat = 60.0 / bpm,
+        };
+    }
+
+    pub fn generateSample(self: *Voice, increment: f32) f32 {
+        defer self.seconds_offset += increment;
+
+        var beat_offset = self.seconds_offset / self.seconds_per_beat;
+
+        // check if we need to find the next note
+        var note = self.notes[self.note_index];
+        while (beat_offset >= note.start + note.duration) {
+            self.note_index += 1;
+            if (self.note_index >= self.notes.len) {
+                self.note_index = 0;
+                self.seconds_offset = 0;
+                beat_offset = 0;
+            }
+            note = self.notes[self.note_index];
+        }
+
+        const radians_per_second = frequencyFromPitch(note.pitch orelse return 0) * 2.0 * std.math.pi;
+
+        var sample = std.math.sin(self.seconds_offset * radians_per_second);
+        const amplitude = std.math.pow(f32, self.decay, beat_offset - note.start);
+        sample *= amplitude;
+
+        return sample;
+    }
+};
 
 var player: sysaudio.Player = undefined;
 
@@ -156,34 +199,23 @@ pub fn main() !void {
     }
 }
 
-var seconds_offset: f32 = 0.0;
-var note_index: usize = 0;
+var melody = Voice.init(&megalovania_notes, 240.0, 0.1);
+var bass = Voice.init(&.{
+    Note.init(0.0, 8.0, "d3"),
+    Note.init(8.0, 8.0, "c3"),
+    Note.init(16.0, 8.0, "b2"),
+    Note.init(24.0, 4.0, "bb2"),
+    Note.init(28.0, 4.0, "c3"),
+}, 240.0, 0.8);
+
 fn writeCallback(_: ?*anyopaque, frames: usize) void {
     const seconds_per_frame = 1.0 / @as(f32, @floatFromInt(player.sampleRate()));
 
-    var beat_offset = seconds_offset / seconds_per_beat;
-
-    // check if we need to find the next note
-    var note = notes[note_index];
-    while (beat_offset >= note.start + note.duration) {
-        note_index += 1;
-        if (note_index >= notes.len) {
-            note_index = 0;
-            seconds_offset = 0;
-            beat_offset = 0;
-        }
-        note = notes[note_index];
-    }
-
-    const radians_per_second = frequencyFromPitch(note.pitch) * 2.0 * std.math.pi;
-
     for (0..frames) |fi| {
-        var sample = std.math.sin((seconds_offset + @as(f32, @floatFromInt(fi)) * seconds_per_frame) * radians_per_second);
-        const amplitude = std.math.pow(f32, 0.2, beat_offset - note.start);
-        sample *= amplitude;
+        var sample = melody.generateSample(seconds_per_frame);
+        sample += bass.generateSample(seconds_per_frame);
         player.writeAll(fi, sample);
     }
-    seconds_offset += seconds_per_frame * @as(f32, @floatFromInt(frames));
 }
 
 fn deviceChange(_: ?*anyopaque) void {
