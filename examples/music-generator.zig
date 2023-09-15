@@ -7,7 +7,7 @@ const Accidental = enum(i8) {
     sharp = 1,
 };
 
-fn noteToFrequency(note: []const u8) f32 {
+fn pitchFromString(note: []const u8) f32 {
     var steps_from_a4: i32 = 0;
 
     const letter = note[0];
@@ -24,31 +24,90 @@ fn noteToFrequency(note: []const u8) f32 {
 
     steps_from_a4 += 12 * (@as(i16, octave) - 4);
     steps_from_a4 += switch (letter) {
-        'C' => -9,
-        'D' => -7,
-        'E' => -5,
-        'F' => -4,
-        'G' => -2,
-        'A' => 0,
-        'B' => 2,
+        'c' => -9,
+        'd' => -7,
+        'e' => -5,
+        'f' => -4,
+        'g' => -2,
+        'a' => 0,
+        'b' => 2,
         else => unreachable,
     };
     steps_from_a4 += @intFromEnum(accidental);
-
-    const half_step = comptime std.math.pow(f32, 2.0, 1.0 / 12.0);
-    return 440.0 * std.math.pow(f32, half_step, @floatFromInt(steps_from_a4));
+    return steps_from_a4;
 }
 
-test noteToFrequency {
-    try std.testing.expectApproxEqRel(@as(f32, 440), noteToFrequency("A4"), 0.0001);
-    try std.testing.expectApproxEqRel(@as(f32, 261.6256), noteToFrequency("C4"), 0.0001);
+fn frequencyFromPitch(pitch: f32) f32 {
+    const half_step = comptime std.math.pow(f32, 2.0, 1.0 / 12.0);
+    return 440.0 * std.math.pow(f32, half_step, pitch);
+}
+
+test pitchFromString {
+    // try std.testing.expectApproxEqRel(@as(f32, 440), pitchFromString("A4"), 0.0001);
+    // try std.testing.expectApproxEqRel(@as(f32, 261.6256), pitchFromString("C4"), 0.0001);
 }
 
 const Note = struct {
+    /// time when the note starts playing, in beats
     start: f32,
+    /// how long the note plays for, in beats
     duration: f32,
+    /// which note should play, in half steps from A4
     pitch: f32,
+
+    pub fn init(start: f32, duration: f32, note_name: []const u8) Note {
+        return .{ .start = start, .duration = duration, .pitch = pitchFromString(note_name) };
+    }
 };
+
+const notes = [_]Note{
+    Note.init(0.0, 0.5, "d4"),
+    Note.init(0.5, 0.5, "d4"),
+    Note.init(1.0, 1.0, "d5"),
+    Note.init(2.0, 1.5, "a4"),
+    Note.init(3.5, 1.0, "g#4"),
+    Note.init(4.5, 1.0, "g4"),
+    Note.init(5.5, 1.0, "f4"),
+    Note.init(6.5, 0.5, "d4"),
+    Note.init(7.0, 0.5, "f4"),
+    Note.init(7.5, 0.5, "g4"),
+
+    Note.init(8.0, 0.5, "c4"),
+    Note.init(8.5, 0.5, "c4"),
+    Note.init(9.0, 1.0, "d5"),
+    Note.init(10.0, 1.5, "a4"),
+    Note.init(11.5, 1.0, "g#4"),
+    Note.init(12.5, 1.0, "g4"),
+    Note.init(13.5, 1.0, "f4"),
+    Note.init(14.5, 0.5, "d4"),
+    Note.init(15.0, 0.5, "f4"),
+    Note.init(15.5, 0.5, "g4"),
+
+    Note.init(16.0, 0.5, "b3"),
+    Note.init(16.5, 0.5, "b3"),
+    Note.init(17.0, 1.0, "d5"),
+    Note.init(18.0, 1.5, "a4"),
+    Note.init(19.5, 1.0, "g#4"),
+    Note.init(20.5, 1.0, "g4"),
+    Note.init(21.5, 1.0, "f4"),
+    Note.init(22.5, 0.5, "d4"),
+    Note.init(23.0, 0.5, "f4"),
+    Note.init(23.5, 0.5, "g4"),
+
+    Note.init(24.0, 0.5, "bb3"),
+    Note.init(24.5, 0.5, "bb3"),
+    Note.init(25.0, 1.0, "d5"),
+    Note.init(26.0, 1.5, "a4"),
+    Note.init(27.5, 1.0, "g#4"),
+    Note.init(28.5, 1.0, "g4"),
+    Note.init(29.5, 1.0, "f4"),
+    Note.init(30.5, 0.5, "d4"),
+    Note.init(31.0, 0.5, "f4"),
+    Note.init(31.5, 0.5, "g4"),
+};
+
+const bpm = 240.0;
+const seconds_per_beat = 60.0 / bpm;
 
 var player: sysaudio.Player = undefined;
 
@@ -72,7 +131,7 @@ pub fn main() !void {
     try player.start();
     std.log.info("Took {} to start the player...", .{std.fmt.fmtDuration(timer.lap())});
 
-    try player.setVolume(0.02);
+    try player.setVolume(0.1);
     std.log.info("Took {} to set the volume...", .{std.fmt.fmtDuration(timer.lap())});
 
     var buf: [16]u8 = undefined;
@@ -98,17 +157,33 @@ pub fn main() !void {
 }
 
 var seconds_offset: f32 = 0.0;
+var note_index: usize = 0;
 fn writeCallback(_: ?*anyopaque, frames: usize) void {
     const seconds_per_frame = 1.0 / @as(f32, @floatFromInt(player.sampleRate()));
 
-    const pitch = 440;
-    const radians_per_second = pitch * 2.0 * std.math.pi;
+    var beat_offset = seconds_offset / seconds_per_beat;
+
+    // check if we need to find the next note
+    var note = notes[note_index];
+    while (beat_offset >= note.start + note.duration) {
+        note_index += 1;
+        if (note_index >= notes.len) {
+            note_index = 0;
+            seconds_offset = 0;
+            beat_offset = 0;
+        }
+        note = notes[note_index];
+    }
+
+    const radians_per_second = frequencyFromPitch(note.pitch) * 2.0 * std.math.pi;
 
     for (0..frames) |fi| {
-        const sample = std.math.sin((seconds_offset + @as(f32, @floatFromInt(fi)) * seconds_per_frame) * radians_per_second);
+        var sample = std.math.sin((seconds_offset + @as(f32, @floatFromInt(fi)) * seconds_per_frame) * radians_per_second);
+        const amplitude = std.math.pow(f32, 0.2, beat_offset - note.start);
+        sample *= amplitude;
         player.writeAll(fi, sample);
     }
-    seconds_offset = @mod(seconds_offset + seconds_per_frame * @as(f32, @floatFromInt(frames)), 1.0);
+    seconds_offset += seconds_per_frame * @as(f32, @floatFromInt(frames));
 }
 
 fn deviceChange(_: ?*anyopaque) void {
