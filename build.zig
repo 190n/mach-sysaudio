@@ -44,6 +44,7 @@ pub fn build(b: *std.Build) void {
     inline for ([_][]const u8{
         "sine-wave",
         "record",
+        "music-generator",
     }) |example| {
         const example_exe = b.addExecutable(.{
             .name = example,
